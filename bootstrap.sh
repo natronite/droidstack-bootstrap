@@ -1,16 +1,39 @@
 #!/bin/bash
 set -euo pipefail
+umask 022
 
 VOLUME_NAME="Data"
 VOLUME_PATH="/Volumes/${VOLUME_NAME}"
 EXPECTED_FS="Case-sensitive APFS"
-USER_DIR="${VOLUME_PATH}/natronite"
-CLONE_DIR="${USER_DIR}/droidstack"
+EDITABLE_PARENT="${VOLUME_PATH}/natronite"
+EDITABLE_CLONE="${EDITABLE_PARENT}/droidstack"
+TRUSTED_PARENT="${HOME}/.local/share"
+TRUSTED_CLONE="${TRUSTED_PARENT}/droidstack"
 REPO_URL="https://github.com/natronite/droidstack.git"
 SETUP_SCRIPT="setup.sh"
 GITHUB_TOKEN=""
+ASKPASS_SCRIPT=""
+
+function cleanup() {
+  if [ -n "$ASKPASS_SCRIPT" ] && [ -e "$ASKPASS_SCRIPT" ]; then
+    rm -f "$ASKPASS_SCRIPT"
+  fi
+  unset GITHUB_TOKEN
+}
+
+trap cleanup EXIT
 
 echo "Bootstrapping droidstack environment"
+
+if /usr/bin/id -u aiagent >/dev/null 2>&1; then
+  cat >&2 <<'EOF'
+❌ Ignition is only for bootstrapping a machine before aiagent exists.
+
+Use the protected droidstack launcher for subsequent setup runs:
+  /usr/local/bin/droidstack-setup
+EOF
+  exit 1
+fi
 
 if ! xcode-select -p >/dev/null 2>&1; then
   echo "📦 Installing Command Line Tools..."
@@ -52,42 +75,64 @@ function verify_case_sensitivity() {
   echo "✅ $VOLUME_PATH is case-sensitive."
 }
 
-function clone_repo_securely() {
-  if [ -d "$CLONE_DIR/.git" ]; then
-    echo "ℹ️ Repo already cloned at $CLONE_DIR"
+function configure_git_credentials() {
+  if [ -n "$ASKPASS_SCRIPT" ]; then
     return
   fi
 
   echo -ne "\a"
   read -rsp "🔑 GitHub Token: " GITHUB_TOKEN
-  
-  echo "📁 Creating directory: $USER_DIR"
-  mkdir -p "$USER_DIR"
+  echo
 
-  echo "📥 Cloning $REPO_URL using secure token handling..."
+  ASKPASS_SCRIPT=$(mktemp)
+  chmod 0700 "$ASKPASS_SCRIPT"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'case "$1" in' \
+    '  *Username*) printf "%s\n" "$GIT_USERNAME" ;;' \
+    '  *) printf "%s\n" "$GITHUB_TOKEN" ;;' \
+    'esac' >"$ASKPASS_SCRIPT"
+}
 
-  local askpass_script
-  askpass_script=$(mktemp)
+function clone_repo_securely() {
+  local clone_dir="$1"
+  local description="$2"
 
-  echo -e "#!/bin/sh\necho \"$GITHUB_TOKEN\"" > "$askpass_script"
-  chmod +x "$askpass_script"
+  if [ -d "$clone_dir/.git" ]; then
+    echo "ℹ️ $description already exists at $clone_dir"
+    return
+  fi
 
-  GIT_USERNAME=natronite GIT_ASKPASS="$askpass_script" git clone "$REPO_URL" "$CLONE_DIR"
+  if [ -e "$clone_dir" ]; then
+    echo "❌ $clone_dir exists but is not a Git checkout." >&2
+    return 1
+  fi
 
-  rm -f "$askpass_script"
-  unset GITHUB_TOKEN
+  configure_git_credentials
+  mkdir -p "$(dirname "$clone_dir")"
+  echo "📥 Creating $description at $clone_dir..."
+  GIT_USERNAME=natronite \
+    GITHUB_TOKEN="$GITHUB_TOKEN" \
+    GIT_ASKPASS="$ASKPASS_SCRIPT" \
+    GIT_TERMINAL_PROMPT=0 \
+    git clone "$REPO_URL" "$clone_dir"
 }
 
 wait_for_volume
 verify_case_sensitivity
-clone_repo_securely
+clone_repo_securely "$EDITABLE_CLONE" "editable Codex checkout"
+clone_repo_securely "$TRUSTED_CLONE" "trusted setup checkout"
+chmod go-w "$HOME" "$HOME/.local" "$TRUSTED_PARENT"
+chmod -R go-w "$TRUSTED_CLONE"
 
 echo "✅ Bootstrap complete."
+echo "ℹ️  Codex works in: $EDITABLE_CLONE"
+echo "ℹ️  Setup runs from: $TRUSTED_CLONE"
 
-# Step 4: Run setup script if present
-if [ -f "$CLONE_DIR/$SETUP_SCRIPT" ]; then
+# Run setup only from the trusted checkout.
+if [ -f "$TRUSTED_CLONE/$SETUP_SCRIPT" ]; then
   echo "🚀 Running setup script: $SETUP_SCRIPT"
-  GITHUB_TOKEN="$GITHUB_TOKEN" bash "$CLONE_DIR/$SETUP_SCRIPT"
+  /bin/zsh "$TRUSTED_CLONE/$SETUP_SCRIPT"
 else
-  echo "⚠️ No setup script found at: $CLONE_DIR/$SETUP_SCRIPT"
+  echo "⚠️ No setup script found at: $TRUSTED_CLONE/$SETUP_SCRIPT"
 fi
