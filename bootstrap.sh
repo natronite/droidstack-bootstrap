@@ -10,6 +10,7 @@ EDITABLE_CLONE="${EDITABLE_PARENT}/droidstack"
 TRUSTED_PARENT="${HOME}/.local/share"
 TRUSTED_CLONE="${TRUSTED_PARENT}/droidstack"
 REPO_URL="https://github.com/natronite/droidstack.git"
+DROIDSTACK_BRANCH="stable"
 SETUP_SCRIPT="setup.sh"
 GITHUB_TOKEN=""
 ASKPASS_SCRIPT=""
@@ -115,7 +116,7 @@ function clone_repo_securely() {
     GITHUB_TOKEN="$GITHUB_TOKEN" \
     GIT_ASKPASS="$ASKPASS_SCRIPT" \
     GIT_TERMINAL_PROMPT=0 \
-    git clone "$REPO_URL" "$clone_dir"
+    git clone --branch "$DROIDSTACK_BRANCH" "$REPO_URL" "$clone_dir"
 }
 
 wait_for_volume
