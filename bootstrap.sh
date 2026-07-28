@@ -13,17 +13,47 @@ REPO_URL="https://github.com/natronite/droidstack.git"
 SSH_REPO_URL="git@github.com:natronite/droidstack.git"
 DROIDSTACK_BRANCH="stable"
 SETUP_SCRIPT="setup.sh"
-GITHUB_TOKEN=""
-ASKPASS_SCRIPT=""
+BOOTSTRAP_SSH_DIRECTORY=""
+BOOTSTRAP_SSH_KEY=""
+BOOTSTRAP_SSH_VERIFIED="false"
 
 function cleanup() {
-  if [ -n "$ASKPASS_SCRIPT" ] && [ -e "$ASKPASS_SCRIPT" ]; then
-    rm -f "$ASKPASS_SCRIPT"
-  fi
-  unset GITHUB_TOKEN
+  case "$BOOTSTRAP_SSH_DIRECTORY" in
+    /private/tmp/ignition-ssh.*)
+      if [ -d "$BOOTSTRAP_SSH_DIRECTORY" ]; then
+        rm -rf "$BOOTSTRAP_SSH_DIRECTORY"
+      fi
+      ;;
+  esac
 }
 
 trap cleanup EXIT
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --ssh-key)
+      if [ "$#" -lt 2 ]; then
+        echo "❌ --ssh-key requires a private-key path." >&2
+        exit 64
+      fi
+      BOOTSTRAP_SSH_KEY="$2"
+      shift 2
+      ;;
+    --help|-h)
+      cat <<'EOF'
+Usage: bootstrap.sh [--ssh-key ABSOLUTE_PATH]
+
+By default, Ignition recovers a resident SSH credential from a connected
+FIDO2 security key. Use --ssh-key only for manual account-recovery fallback.
+EOF
+      exit
+      ;;
+    *)
+      echo "❌ Unknown option: $1" >&2
+      exit 64
+      ;;
+  esac
+done
 
 echo "Bootstrapping droidstack environment"
 
@@ -77,23 +107,105 @@ function verify_case_sensitivity() {
   echo "✅ $VOLUME_PATH is case-sensitive."
 }
 
-function configure_git_credentials() {
-  if [ -n "$ASKPASS_SCRIPT" ]; then
+function git_with_bootstrap_key() {
+  GIT_TERMINAL_PROMPT=0 \
+    GIT_SSH_COMMAND="/usr/bin/ssh -i $BOOTSTRAP_SSH_KEY -o IdentitiesOnly=yes" \
+    /usr/bin/git "$@"
+}
+
+function bootstrap_key_authenticates() {
+  git_with_bootstrap_key \
+    ls-remote "$SSH_REPO_URL" "refs/heads/$DROIDSTACK_BRANCH" \
+    >/dev/null 2>&1
+}
+
+function ensure_bootstrap_ssh_key() {
+  local candidate
+
+  if [ "$BOOTSTRAP_SSH_VERIFIED" = "true" ]; then
     return
   fi
 
-  echo -ne "\a"
-  read -rsp "🔑 GitHub Token: " GITHUB_TOKEN
-  echo
+  if [ -n "$BOOTSTRAP_SSH_KEY" ]; then
+    case "$BOOTSTRAP_SSH_KEY" in
+      /*)
+        ;;
+      *)
+        echo "❌ Bootstrap SSH-key path must be absolute." >&2
+        exit 1
+        ;;
+    esac
+    if [ ! -f "$BOOTSTRAP_SSH_KEY" ] || [ -L "$BOOTSTRAP_SSH_KEY" ]; then
+      echo "❌ Bootstrap SSH key is not a regular file: $BOOTSTRAP_SSH_KEY" >&2
+      exit 1
+    fi
+    case "$BOOTSTRAP_SSH_KEY" in
+      *[!A-Za-z0-9_./-]*)
+        echo "❌ Bootstrap SSH-key path contains unsupported characters." >&2
+        exit 1
+        ;;
+    esac
+  else
+    BOOTSTRAP_SSH_DIRECTORY="$(mktemp -d /private/tmp/ignition-ssh.XXXXXX)"
 
-  ASKPASS_SCRIPT=$(mktemp)
-  chmod 0700 "$ASKPASS_SCRIPT"
-  printf '%s\n' \
-    '#!/bin/sh' \
-    'case "$1" in' \
-    '  *Username*) printf "%s\n" "$GIT_USERNAME" ;;' \
-    '  *) printf "%s\n" "$GITHUB_TOKEN" ;;' \
-    'esac' >"$ASKPASS_SCRIPT"
+    cat <<'EOF'
+🔐 Insert the FIDO2 security key containing the resident GitHub SSH
+   credential. You may be asked for its PIN and to touch or verify on the key.
+
+   Verify any first-connection host-key prompt against:
+   https://docs.github.com/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
+EOF
+
+    if ! (
+      cd "$BOOTSTRAP_SSH_DIRECTORY"
+      /usr/bin/ssh-keygen -K
+    ); then
+      cat >&2 <<'EOF'
+❌ No resident SSH credential could be recovered.
+
+If the security key is available, verify that its resident GitHub SSH key was
+created and registered before this rebuild.
+
+For manual recovery, regain GitHub access using a backup passkey, security key,
+GitHub Mobile, or recovery code. Generate and upload a local SSH key,
+then rerun:
+
+  /bin/bash /tmp/ignition-bootstrap.sh \
+    --ssh-key ~/.ssh/id_ed25519_github_natronite
+EOF
+      exit 1
+    fi
+
+    for candidate in "$BOOTSTRAP_SSH_DIRECTORY"/id_*; do
+      [ -f "$candidate" ] || continue
+      case "$candidate" in
+        *.pub)
+          continue
+          ;;
+      esac
+
+      BOOTSTRAP_SSH_KEY="$candidate"
+      if bootstrap_key_authenticates; then
+        BOOTSTRAP_SSH_VERIFIED="true"
+        break
+      fi
+      BOOTSTRAP_SSH_KEY=""
+    done
+  fi
+
+  if [ -z "$BOOTSTRAP_SSH_KEY" ]; then
+    echo "❌ No resident SSH credential can read the private Droidstack repository." >&2
+    exit 1
+  fi
+
+  if [ "$BOOTSTRAP_SSH_VERIFIED" != "true" ] &&
+    ! bootstrap_key_authenticates; then
+    echo "❌ The selected SSH credential cannot read the private Droidstack repository." >&2
+    exit 1
+  fi
+
+  BOOTSTRAP_SSH_VERIFIED="true"
+  echo "✅ Bootstrap SSH credential authenticated."
 }
 
 function clone_repo_securely() {
@@ -109,7 +221,9 @@ function clone_repo_securely() {
     echo "🔎 Validating existing $description at $clone_dir..."
 
     origin=$(/usr/bin/git -C "$clone_dir" remote get-url origin 2>/dev/null || true)
-    if [ "$origin" != "$REPO_URL" ] && [ "$origin" != "$SSH_REPO_URL" ]; then
+    if [ "$origin" != "$REPO_URL" ] &&
+      [ "$origin" != "$SSH_REPO_URL" ] &&
+      [ "$origin" != "git@github.com-natronite:natronite/droidstack.git" ]; then
       echo "❌ Unexpected origin for $description: $origin" >&2
       return 1
     fi
@@ -126,12 +240,9 @@ function clone_repo_securely() {
     fi
 
     if [ "$require_remote_match" = "true" ]; then
-      configure_git_credentials
-      GIT_USERNAME=natronite \
-        GITHUB_TOKEN="$GITHUB_TOKEN" \
-        GIT_ASKPASS="$ASKPASS_SCRIPT" \
-        GIT_TERMINAL_PROMPT=0 \
-        /usr/bin/git -C "$clone_dir" fetch origin "$DROIDSTACK_BRANCH"
+      ensure_bootstrap_ssh_key
+      git_with_bootstrap_key \
+        -C "$clone_dir" fetch "$SSH_REPO_URL" "$DROIDSTACK_BRANCH"
 
       current_commit=$(/usr/bin/git -C "$clone_dir" rev-parse HEAD)
       fetched_commit=$(/usr/bin/git -C "$clone_dir" rev-parse FETCH_HEAD)
@@ -141,6 +252,7 @@ function clone_repo_securely() {
       fi
     fi
 
+    /usr/bin/git -C "$clone_dir" remote set-url origin "$REPO_URL"
     echo "✅ Existing $description is valid."
     return
   fi
@@ -150,14 +262,12 @@ function clone_repo_securely() {
     return 1
   fi
 
-  configure_git_credentials
+  ensure_bootstrap_ssh_key
   mkdir -p "$(dirname "$clone_dir")"
   echo "📥 Creating $description at $clone_dir..."
-  GIT_USERNAME=natronite \
-    GITHUB_TOKEN="$GITHUB_TOKEN" \
-    GIT_ASKPASS="$ASKPASS_SCRIPT" \
-    GIT_TERMINAL_PROMPT=0 \
-    /usr/bin/git clone --branch "$DROIDSTACK_BRANCH" "$REPO_URL" "$clone_dir"
+  git_with_bootstrap_key \
+    clone --branch "$DROIDSTACK_BRANCH" "$SSH_REPO_URL" "$clone_dir"
+  /usr/bin/git -C "$clone_dir" remote set-url origin "$REPO_URL"
 }
 
 wait_for_volume
