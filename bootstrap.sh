@@ -10,6 +10,7 @@ EDITABLE_CLONE="${EDITABLE_PARENT}/droidstack"
 TRUSTED_PARENT="${HOME}/.local/share"
 TRUSTED_CLONE="${TRUSTED_PARENT}/droidstack"
 REPO_URL="https://github.com/natronite/droidstack.git"
+SSH_REPO_URL="git@github.com:natronite/droidstack.git"
 DROIDSTACK_BRANCH="stable"
 SETUP_SCRIPT="setup.sh"
 GITHUB_TOKEN=""
@@ -98,9 +99,49 @@ function configure_git_credentials() {
 function clone_repo_securely() {
   local clone_dir="$1"
   local description="$2"
+  local require_remote_match="$3"
+  local branch
+  local current_commit
+  local fetched_commit
+  local origin
 
   if [ -d "$clone_dir/.git" ]; then
-    echo "ℹ️ $description already exists at $clone_dir"
+    echo "🔎 Validating existing $description at $clone_dir..."
+
+    origin=$(/usr/bin/git -C "$clone_dir" remote get-url origin 2>/dev/null || true)
+    if [ "$origin" != "$REPO_URL" ] && [ "$origin" != "$SSH_REPO_URL" ]; then
+      echo "❌ Unexpected origin for $description: $origin" >&2
+      return 1
+    fi
+
+    branch=$(/usr/bin/git -C "$clone_dir" branch --show-current)
+    if [ "$branch" != "$DROIDSTACK_BRANCH" ]; then
+      echo "❌ $description must be on $DROIDSTACK_BRANCH, not $branch." >&2
+      return 1
+    fi
+
+    if [ -n "$(/usr/bin/git -C "$clone_dir" status --porcelain --untracked-files=normal)" ]; then
+      echo "❌ $description has uncommitted changes." >&2
+      return 1
+    fi
+
+    if [ "$require_remote_match" = "true" ]; then
+      configure_git_credentials
+      GIT_USERNAME=natronite \
+        GITHUB_TOKEN="$GITHUB_TOKEN" \
+        GIT_ASKPASS="$ASKPASS_SCRIPT" \
+        GIT_TERMINAL_PROMPT=0 \
+        /usr/bin/git -C "$clone_dir" fetch origin "$DROIDSTACK_BRANCH"
+
+      current_commit=$(/usr/bin/git -C "$clone_dir" rev-parse HEAD)
+      fetched_commit=$(/usr/bin/git -C "$clone_dir" rev-parse FETCH_HEAD)
+      if [ "$current_commit" != "$fetched_commit" ]; then
+        echo "❌ $description does not exactly match the fetched $DROIDSTACK_BRANCH branch." >&2
+        return 1
+      fi
+    fi
+
+    echo "✅ Existing $description is valid."
     return
   fi
 
@@ -116,13 +157,13 @@ function clone_repo_securely() {
     GITHUB_TOKEN="$GITHUB_TOKEN" \
     GIT_ASKPASS="$ASKPASS_SCRIPT" \
     GIT_TERMINAL_PROMPT=0 \
-    git clone --branch "$DROIDSTACK_BRANCH" "$REPO_URL" "$clone_dir"
+    /usr/bin/git clone --branch "$DROIDSTACK_BRANCH" "$REPO_URL" "$clone_dir"
 }
 
 wait_for_volume
 verify_case_sensitivity
-clone_repo_securely "$EDITABLE_CLONE" "editable Codex checkout"
-clone_repo_securely "$TRUSTED_CLONE" "trusted setup checkout"
+clone_repo_securely "$EDITABLE_CLONE" "editable Codex checkout" "false"
+clone_repo_securely "$TRUSTED_CLONE" "trusted setup checkout" "true"
 chmod go-w "$HOME" "$HOME/.local" "$TRUSTED_PARENT"
 chmod -R go-w "$TRUSTED_CLONE"
 
