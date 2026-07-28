@@ -64,14 +64,14 @@ upload the normal per-Mac local SSH key:
 ```sh
 /usr/bin/ssh-keygen -t ed25519 -a 100 \
   -C "natronite GitHub recovery" \
-  -f ~/.ssh/id_ed25519_github_natronite
+  -f ~/.ssh/github_ed25519
 ```
 
 Then pass its path explicitly:
 
 ```sh
 /bin/bash /tmp/ignition-bootstrap.sh \
-  --ssh-key ~/.ssh/id_ed25519_github_natronite
+  --ssh-key ~/.ssh/github_ed25519
 ```
 
 Ignition never stores a GitHub token or copies a private key into either

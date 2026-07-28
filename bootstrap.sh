@@ -171,7 +171,7 @@ GitHub Mobile, or recovery code. Generate and upload a local SSH key,
 then rerun:
 
   /bin/bash /tmp/ignition-bootstrap.sh \
-    --ssh-key ~/.ssh/id_ed25519_github_natronite
+    --ssh-key ~/.ssh/github_ed25519
 EOF
       exit 1
     fi
